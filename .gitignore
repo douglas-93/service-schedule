@@ -1,0 +1,22 @@
+# Executáveis gerados
+*.exe
+*.exe~
+service-schedule.exe
+
+# Arquivos de ambiente locais
+.env
+
+# Arquivos de log gerados pelo modo daemon
+*.log
+
+# Diretórios e configurações de IDEs
+.idea/
+.vscode/
+
+# Arquivos de teste e profile do Go
+*.test
+*.prof
+*.out
+
+# Diretório vendor (caso utilize go mod vendor)
+vendor/
