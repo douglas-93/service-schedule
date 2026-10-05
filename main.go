@@ -1,3 +1,47 @@
+/*
+Utilitário em Go para gerenciar (parar/iniciar) serviços do Windows,
+substituindo o Task Scheduler quando ele não está funcionando.
+
+Requer o módulo oficial da extensão Windows do Go:
+
+	go get golang.org/x/sys/windows/svc/mgr
+
+Compilação (a partir de Linux/Mac, cross-compile para Windows):
+
+	GOOS=windows GOARCH=amd64 go build -o svcsched.exe service_scheduler.go
+
+---------------------------------------------------------------------------
+MODO 1 - one-shot: para agora, espera X tempo, reinicia e encerra.
+
+	svcsched.exe -mode once -services "Spooler,MyService" -delay 5m
+
+MODO 2 - agendador contínuo: fica rodando (ideal como serviço do Windows)
+e todo dia, nos horários definidos, para e inicia os serviços.
+
+	svcsched.exe -mode daemon -services "Spooler,MyService" -stop-at 22:00 -start-at 06:00
+
+---------------------------------------------------------------------------
+SUPORTE A .env
+
+As flags continuam funcionando normalmente e têm prioridade máxima.
+Se uma flag NÃO for passada na linha de comando, o programa procura o
+valor correspondente em um arquivo .env (por padrão, na pasta atual;
+mude com -env caminho\para\arquivo.env). Chaves aceitas no .env:
+
+	SERVICES=Spooler,MyService
+	MODE=daemon
+	DELAY=5m
+	STOP_AT=22:00
+	START_AT=06:00
+	CTL_TIMEOUT=30s
+	START_RETRIES=3
+	START_RETRY_INTERVAL=5s
+	REMOTE_HOST=192.168.1.100
+
+Ordem de prioridade: flag explícita > variável de ambiente já exportada
+no sistema > valor do .env > valor padrão da flag.
+---------------------------------------------------------------------------
+*/
 package main
 
 import (
@@ -7,6 +51,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -120,6 +165,20 @@ func startServiceConcurrently(host, name string, timeout time.Duration) error {
 	return nil
 }
 
+func retryStart(name string, retries int, retryDelay time.Duration, start func() error) error {
+	for attempt := 1; ; attempt++ {
+		err := start()
+		if err == nil {
+			return nil
+		}
+		if attempt > retries {
+			return fmt.Errorf("falha ao iniciar %q após %d tentativa(s): %w", name, attempt, err)
+		}
+		log.Printf("ERRO ao iniciar %q (tentativa %d): %v; nova tentativa em %s", name, attempt, err, retryDelay)
+		time.Sleep(retryDelay)
+	}
+}
+
 func stopAll(host string, names []string, timeout time.Duration) {
 	var wg sync.WaitGroup
 	for _, n := range names {
@@ -134,13 +193,15 @@ func stopAll(host string, names []string, timeout time.Duration) {
 	wg.Wait()
 }
 
-func startAll(host string, names []string, timeout time.Duration) {
+func startAll(host string, names []string, timeout, retryInterval time.Duration, retries int) {
 	var wg sync.WaitGroup
 	for _, n := range names {
 		wg.Add(1)
 		go func(serviceName string) {
 			defer wg.Done()
-			if err := startServiceConcurrently(host, serviceName, timeout); err != nil {
+			if err := retryStart(serviceName, retries, retryInterval, func() error {
+				return startServiceConcurrently(host, serviceName, timeout)
+			}); err != nil {
 				log.Printf("ERRO ao iniciar %q: %v", serviceName, err)
 			}
 		}(n)
@@ -162,7 +223,7 @@ func nextOccurrence(from time.Time, hhmm string) (time.Time, error) {
 	return candidate, nil
 }
 
-func runDaemon(host string, names []string, stopAt, startAt string, ctlTimeout time.Duration, ctxStop chan struct{}) {
+func runDaemon(host string, names []string, stopAt, startAt string, ctlTimeout time.Duration, startRetries int, retryInterval time.Duration, ctxStop chan struct{}) {
 	target := "localhost"
 	if host != "" {
 		target = host
@@ -208,7 +269,7 @@ func runDaemon(host string, names []string, stopAt, startAt string, ctlTimeout t
 			if isStopAction {
 				stopAll(host, names, ctlTimeout)
 			} else {
-				startAll(host, names, ctlTimeout)
+				startAll(host, names, ctlTimeout, retryInterval, startRetries)
 			}
 		}
 	}
@@ -220,26 +281,20 @@ func main() {
 	// Sobrescreve a flag -help para exibir exatamente o comentário original
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Utilitário em Go para gerenciar (parar/iniciar) serviços do Windows,
-substituindo o Task Scheduler quando ele não está funcionando.
-
-Requer o módulo oficial da extensão Windows do Go:
-  go get golang.org/x/sys/windows/svc/mgr
-
-Compilação (a partir de Linux/Mac, cross-compile para Windows):
-  GOOS=windows GOARCH=amd64 go build -o svcsched.exe service_scheduler.go
+alternativa o Task Scheduler.
 
 ---------------------------------------------------------------------------
 MODO 1 - one-shot: para agora, espera X tempo, reinicia e encerra.
-  svcsched.exe -mode once -services "Spooler,MyService" -delay 5m
+  service-schedule.exe -mode once -services "Spooler,MyService" -delay 5m
 
 MODO 2 - agendador contínuo: fica rodando (ideal como serviço do Windows)
 e todo dia, nos horários definidos, para e inicia os serviços.
-  svcsched.exe -mode daemon -services "Spooler,MyService" -stop-at 22:00 -start-at 06:00
+  service-schedule.exe -mode daemon -services "Spooler,MyService" -stop-at 22:00 -start-at 06:00
 
 ---------------------------------------------------------------------------
 SUPORTE A .env
 
-As flags continuam funcionando normalmente e têm prioridade máxima.
+As flags têm prioridade sob o .env.
 Se uma flag NÃO for passada na linha de comando, o programa procura o
 valor correspondente em um arquivo .env (por padrão, na pasta atual;
 mude com -env caminho\para\arquivo.env). Chaves aceitas no .env:
@@ -250,6 +305,8 @@ mude com -env caminho\para\arquivo.env). Chaves aceitas no .env:
   STOP_AT=22:00
   START_AT=06:00
   CTL_TIMEOUT=30s
+  START_RETRIES=3
+  START_RETRY_INTERVAL=5s
   REMOTE_HOST=192.168.1.100
 
 Ordem de prioridade: flag explícita > variável de ambiente já exportada
@@ -266,6 +323,8 @@ no sistema > valor do .env > valor padrão da flag.
 	stopAt := flag.String("stop-at", "22:00", "modo daemon: horário HH:MM para parar os serviços")
 	startAt := flag.String("start-at", "06:00", "modo daemon: horário HH:MM para iniciar os serviços")
 	ctlTimeout := flag.Duration("ctl-timeout", 30*time.Second, "timeout esperando cada Start/Stop confirmar")
+	startRetries := flag.Int("start-retries", 3, "quantidade de novas tentativas para iniciar cada serviço")
+	retryInterval := flag.Duration("start-retry-interval", 5*time.Second, "intervalo entre tentativas de inicialização (ex: 5s, 1m)")
 	flag.Parse()
 
 	explicit := make(map[string]bool)
@@ -321,6 +380,30 @@ no sistema > valor do .env > valor padrão da flag.
 			*ctlTimeout = d
 		}
 	}
+	if !explicit["start-retries"] {
+		if v, ok := os.LookupEnv("START_RETRIES"); ok {
+			retries, err := strconv.Atoi(v)
+			if err != nil {
+				log.Fatalf("START_RETRIES inválido no .env (%q): deve ser um inteiro não negativo", v)
+			}
+			*startRetries = retries
+		}
+	}
+	if *startRetries < 0 {
+		log.Fatal("START_RETRIES/-start-retries deve ser um inteiro não negativo")
+	}
+	if !explicit["start-retry-interval"] {
+		if v, ok := os.LookupEnv("START_RETRY_INTERVAL"); ok {
+			interval, err := time.ParseDuration(v)
+			if err != nil {
+				log.Fatalf("START_RETRY_INTERVAL inválido no .env (%q): deve ser uma duração válida (ex: 5s, 1m)", v)
+			}
+			*retryInterval = interval
+		}
+	}
+	if *retryInterval < 0 {
+		log.Fatal("START_RETRY_INTERVAL/-start-retry-interval deve ser uma duração não negativa")
+	}
 
 	// Validação de IP, se fornecido
 	if *hostFlag != "" {
@@ -367,11 +450,11 @@ no sistema > valor do .env > valor padrão da flag.
 			return
 		case <-timer.C:
 			log.Printf("Iniciando serviços: %s", strings.Join(names, ", "))
-			startAll(*hostFlag, names, *ctlTimeout)
+			startAll(*hostFlag, names, *ctlTimeout, *retryInterval, *startRetries)
 		}
 
 	case "daemon":
-		go runDaemon(*hostFlag, names, *stopAt, *startAt, *ctlTimeout, daemonStopChan)
+		go runDaemon(*hostFlag, names, *stopAt, *startAt, *ctlTimeout, *startRetries, *retryInterval, daemonStopChan)
 		<-daemonStopChan
 		log.Println("Aplicação encerrada com sucesso.")
 

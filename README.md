@@ -51,7 +51,7 @@ Mantém o programa em execução e, todos os dias, para e inicia os serviços no
 .\service-schedule.exe -mode daemon -services "Spooler,W3SVC" -stop-at 22:00 -start-at 06:00
 ```
 
-O programa pode ser interrompido com `Ctrl+C` ou com um sinal de encerramento. Os serviços são controlados em paralelo.
+O programa pode ser interrompido com `Ctrl+C` ou com um sinal de encerramento. Os serviços são controlados em paralelo. Se a inicialização de um serviço falhar, o programa repete a operação conforme `START_RETRIES`, aguardando o intervalo definido em `START_RETRY_INTERVAL` entre as tentativas.
 
 ### Servidor remoto
 
@@ -80,6 +80,8 @@ DELAY=5m
 STOP_AT=22:00
 START_AT=06:00
 CTL_TIMEOUT=30s
+START_RETRIES=3
+START_RETRY_INTERVAL=5s
 REMOTE_HOST=192.168.1.100
 ```
 
@@ -108,6 +110,10 @@ A precedência dos valores é:
 | `-stop-at` | `22:00` | Horário diário para parar no modo `daemon`. |
 | `-start-at` | `06:00` | Horário diário para iniciar no modo `daemon`. |
 | `-ctl-timeout` | `30s` | Tempo máximo para confirmar cada operação de Start/Stop. |
+| `-start-retries` | `3` | Novas tentativas de inicialização por serviço após a tentativa inicial. `0` desativa retries. |
+| `-start-retry-interval` | `5s` | Intervalo entre tentativas (ex.: `10s` ou `1m`). `0s` repete imediatamente. |
+
+O limite de inicialização simultânea depende da máquina, dos serviços e de suas dependências; o Windows não define um número universal adequado a todos os ambientes. Se muitos serviços falharem juntos, limitar a concorrência (por exemplo, iniciá-los em pequenos grupos) pode reduzir a carga no Service Control Manager e no próprio servidor. O retry implementado é uma proteção complementar; ele não substitui o controle de concorrência quando houver sobrecarga.
 
 Veja todos os parâmetros com:
 
